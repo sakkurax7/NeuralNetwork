@@ -25,6 +25,8 @@ class MnistDataset {
     static MnistDataset load(const std::string &imagesPath,
                              const std::string &labelsPath,
                              std::size_t limit = 0);
+    static MnistDataset loadImagesOnly(const std::string &imagesPath,
+                                       std::size_t limit = 0);
 
     std::size_t size() const;
     const MnistSample &operator[](std::size_t index) const;

@@ -84,6 +84,52 @@ MnistDataset MnistDataset::load(const std::string &imagesPath,
     return dataset;
 }
 
+MnistDataset MnistDataset::loadImagesOnly(const std::string &imagesPath, std::size_t limit) {
+    std::ifstream images(imagesPath, std::ios::binary);
+    if (!images) {
+        throw std::runtime_error("Unable to open images file: " + imagesPath);
+    }
+
+    const std::uint32_t imageMagic = readBigEndianUInt32(images);
+    const std::uint32_t imageCount = readBigEndianUInt32(images);
+    const std::uint32_t rows = readBigEndianUInt32(images);
+    const std::uint32_t cols = readBigEndianUInt32(images);
+
+    if (imageMagic != 2051) {
+        throw std::runtime_error("Invalid image file magic number (expected 2051)");
+    }
+
+    const std::size_t available = static_cast<std::size_t>(imageCount);
+    if (available == 0) {
+        throw std::runtime_error("MNIST image file contains zero samples");
+    }
+
+    const std::size_t toRead = (limit == 0 || limit > available) ? available : limit;
+    const std::size_t pixelsPerImage = static_cast<std::size_t>(rows) * cols;
+
+    MnistDataset dataset;
+    dataset.samples.reserve(toRead);
+
+    for (std::size_t idx = 0; idx < toRead; ++idx) {
+        MnistSample sample;
+        sample.pixels.resize(pixelsPerImage);
+        sample.label = 255;
+
+        for (std::size_t p = 0; p < pixelsPerImage; ++p) {
+            unsigned char pixel = 0;
+            images.read(reinterpret_cast<char *>(&pixel), 1);
+            if (!images) {
+                throw std::runtime_error("Unexpected end of image file");
+            }
+            sample.pixels[p] = static_cast<double>(pixel) / 255.0;
+        }
+
+        dataset.samples.push_back(std::move(sample));
+    }
+
+    return dataset;
+}
+
 std::size_t MnistDataset::size() const {
     return samples.size();
 }

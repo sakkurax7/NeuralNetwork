@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <iomanip>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 
 namespace {
@@ -29,7 +32,7 @@ std::vector<double> matVecMul(const std::vector<std::vector<double>> &m,
 NeuralNetwork::NeuralNetwork(const std::vector<uint> &layerSizes,
                              const std::vector<ActivationType> &activations,
                              double learningRate)
-    : lr(learningRate) {
+    : lr(learningRate), layerShape(layerSizes), layerActivations(activations) {
     if (layerSizes.size() < 2) {
         throw std::invalid_argument("Network must have at least 2 layers");
     }
@@ -77,6 +80,142 @@ std::uint8_t NeuralNetwork::predictClass(const std::vector<double> &input) {
     const std::vector<double> output = forward(input);
     return static_cast<std::uint8_t>(
         std::distance(output.begin(), std::max_element(output.begin(), output.end())));
+}
+
+void NeuralNetwork::saveModel(const std::string &modelPath) const {
+    std::ofstream out(modelPath);
+    if (!out) {
+        throw std::runtime_error("Unable to open model file for writing: " + modelPath);
+    }
+
+    out << "NN_MODEL_V1\n";
+    out << "shape " << layerShape.size() << "\n";
+    for (uint size : layerShape) {
+        out << size << " ";
+    }
+    out << "\n";
+
+    out << "activations " << layerActivations.size() << "\n";
+    for (ActivationType type : layerActivations) {
+        out << activationToString(type) << " ";
+    }
+    out << "\n";
+
+    out << std::setprecision(17);
+    out << "learning_rate " << lr << "\n";
+    out << "layer_count " << layers.size() << "\n";
+
+    for (std::size_t layerIdx = 0; layerIdx < layers.size(); ++layerIdx) {
+        const DenseLayer &layer = layers[layerIdx];
+        const std::size_t outSize = layer.weights.size();
+        const std::size_t inSize = outSize == 0 ? 0 : layer.weights[0].size();
+
+        out << "layer " << layerIdx << " " << outSize << " " << inSize << "\n";
+        for (const auto &row : layer.weights) {
+            for (double weight : row) {
+                out << weight << " ";
+            }
+            out << "\n";
+        }
+        out << "biases ";
+        for (double bias : layer.biases) {
+            out << bias << " ";
+        }
+        out << "\n";
+    }
+}
+
+NeuralNetwork NeuralNetwork::loadModel(const std::string &modelPath, double learningRate) {
+    std::ifstream in(modelPath);
+    if (!in) {
+        throw std::runtime_error("Unable to open model file: " + modelPath);
+    }
+
+    std::string magic;
+    in >> magic;
+    if (magic != "NN_MODEL_V1") {
+        throw std::runtime_error("Unsupported model file format");
+    }
+
+    std::string token;
+    std::size_t shapeCount = 0;
+    in >> token >> shapeCount;
+    if (token != "shape" || shapeCount < 2) {
+        throw std::runtime_error("Invalid model shape header");
+    }
+
+    std::vector<uint> shape(shapeCount);
+    for (std::size_t i = 0; i < shapeCount; ++i) {
+        in >> shape[i];
+    }
+
+    std::size_t activationCount = 0;
+    in >> token >> activationCount;
+    if (token != "activations" || activationCount != shapeCount - 1) {
+        throw std::runtime_error("Invalid model activations header");
+    }
+
+    std::vector<ActivationType> activations;
+    activations.reserve(activationCount);
+    for (std::size_t i = 0; i < activationCount; ++i) {
+        std::string activationName;
+        in >> activationName;
+        activations.push_back(activationFromString(activationName));
+    }
+
+    double storedLearningRate = 0.0;
+    in >> token >> storedLearningRate;
+    if (token != "learning_rate") {
+        throw std::runtime_error("Invalid model learning rate header");
+    }
+
+    std::size_t layerCount = 0;
+    in >> token >> layerCount;
+    if (token != "layer_count" || layerCount != activationCount) {
+        throw std::runtime_error("Invalid model layer count");
+    }
+
+    NeuralNetwork net(shape, activations, learningRate);
+    if (learningRate <= 0.0) {
+        net.lr = storedLearningRate;
+    }
+
+    for (std::size_t layerIdx = 0; layerIdx < layerCount; ++layerIdx) {
+        std::size_t parsedLayerIdx = 0;
+        std::size_t outSize = 0;
+        std::size_t inSize = 0;
+
+        in >> token >> parsedLayerIdx >> outSize >> inSize;
+        if (token != "layer" || parsedLayerIdx != layerIdx) {
+            throw std::runtime_error("Invalid layer block header");
+        }
+
+        DenseLayer &layer = net.layers[layerIdx];
+        if (layer.weights.size() != outSize ||
+            (!layer.weights.empty() && layer.weights[0].size() != inSize)) {
+            throw std::runtime_error("Layer dimensions do not match model shape");
+        }
+
+        for (std::size_t r = 0; r < outSize; ++r) {
+            for (std::size_t c = 0; c < inSize; ++c) {
+                in >> layer.weights[r][c];
+            }
+        }
+
+        in >> token;
+        if (token != "biases") {
+            throw std::runtime_error("Expected biases block");
+        }
+        for (std::size_t b = 0; b < outSize; ++b) {
+            in >> layer.biases[b];
+        }
+    }
+
+    if (!in) {
+        throw std::runtime_error("Model file ended unexpectedly");
+    }
+
+    return net;
 }
 
 std::vector<double> NeuralNetwork::forwardInternal(const std::vector<double> &input) {
@@ -216,4 +355,34 @@ std::vector<double> NeuralNetwork::softmax(const std::vector<double> &z) {
     }
 
     return exps;
+}
+
+std::string NeuralNetwork::activationToString(ActivationType type) {
+    switch (type) {
+    case ActivationType::Sigmoid:
+        return "sigmoid";
+    case ActivationType::Tanh:
+        return "tanh";
+    case ActivationType::ReLU:
+        return "relu";
+    case ActivationType::Softmax:
+        return "softmax";
+    }
+    throw std::invalid_argument("Unsupported activation type");
+}
+
+ActivationType NeuralNetwork::activationFromString(const std::string &name) {
+    if (name == "sigmoid") {
+        return ActivationType::Sigmoid;
+    }
+    if (name == "tanh") {
+        return ActivationType::Tanh;
+    }
+    if (name == "relu") {
+        return ActivationType::ReLU;
+    }
+    if (name == "softmax") {
+        return ActivationType::Softmax;
+    }
+    throw std::invalid_argument("Unknown activation name: " + name);
 }

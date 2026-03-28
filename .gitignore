@@ -33,3 +33,4 @@
 
 *mnist*
 .vscode
+bin/*
