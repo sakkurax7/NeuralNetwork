@@ -1,6 +1,6 @@
-# NeuralNetwork (MNIST Refactor)
+# NeuralNetwork
 
-A clean C++17 feed-forward neural network implementation focused on MNIST.
+A custom C++17 feed-forward neural network implementation focused on MNIST.
 
 ## Features
 - Layer-based network implementation (easy to read and extend).
@@ -20,7 +20,7 @@ A clean C++17 feed-forward neural network implementation focused on MNIST.
 make
 ```
 
-## Train (with validation split + save weights)
+## Train
 ```bash
 ./bin/main train [images] [labels] [model_out] [epochs] [learning_rate] [sample_limit] [validation_split] [options]
 ```
