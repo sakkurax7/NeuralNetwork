@@ -1,108 +1,76 @@
-#ifndef _global_nn_hpp
-#define _global_nn_hpp
+#ifndef GLOBAL_NEURALNETWORK_HPP
+#define GLOBAL_NEURALNETWORK_HPP
 
+#include <cstddef>
+#include <cstdint>
+#include <string>
 #include <vector>
-#include <iostream> 
-#include <cstdlib>
-#include <cassert>
-#include <cmath>
-#include <tgmath.h>
-
-#include <fstream>
-#include <sstream>
-#include <ctime>
-
-#include <cstring>
 
 typedef unsigned int uint;
-using namespace std;
 
-struct Connection {
-	double weight;
-	double deltaWeight;
+enum class ActivationType {
+    Sigmoid,
+    Tanh,
+    ReLU,
+    Softmax
 };
 
-class Neuron;
-typedef vector<Neuron> Layer;
+struct MnistSample {
+    std::vector<double> pixels;
+    std::uint8_t label;
+};
+
+class MnistDataset {
+  public:
+    static MnistDataset load(const std::string &imagesPath,
+                             const std::string &labelsPath,
+                             std::size_t limit = 0);
+
+    std::size_t size() const;
+    const MnistSample &operator[](std::size_t index) const;
+    std::vector<double> oneHotLabel(std::size_t index, std::size_t classes) const;
+
+  private:
+    std::vector<MnistSample> samples;
+};
 
 class NeuralNetwork {
-	public:
-		NeuralNetwork(const vector<uint> &topology, bool softmax);
-		void forwardProp(const vector<double> &inputVals);
-		void backProp(const vector<double> &targetVals);
-		void getResults(vector<double> &resultValues) const; // Doesn't modify the net so it's a constant function
-        double getAvgError(void) const { return p_recentAvgError; }
-		
-	private:
-		vector<Layer> p_layers; 	// p_layers[layer#][node#]
-                                    // Layer is vector<Neuron> so vector<vector<Neuron>>
+  public:
+    NeuralNetwork(const std::vector<uint> &layerSizes,
+                  const std::vector<ActivationType> &activations,
+                  double learningRate);
 
-		double p_error;
-		double p_recentAvgError;
-		double p_recentAverageSmoothingFactor;
-};
+    std::vector<double> forward(const std::vector<double> &input);
+    double trainSample(const std::vector<double> &input,
+                       const std::vector<double> &target);
+    std::uint8_t predictClass(const std::vector<double> &input);
+    void saveModel(const std::string &modelPath) const;
+    static NeuralNetwork loadModel(const std::string &modelPath, double learningRate);
 
-class Neuron {
-	public:
-	//	Neuron(uint numOutputs, uint neuronIndex);
-		Neuron(uint numOutputs, uint neuronIndex, bool softmax);
-		void setOutputValue(double val) { p_outputVal = val; }
-		double getOutputVal(void) const { return p_outputVal; }
-		void forwardProp(const Layer &prevLayer);
-		void calcOutputGradients(double targetVal);
-		void calcHiddenGradients(const Layer &nextLayer);
-		void updateInputWeights(Layer &prevLayer);
-	private:
-		static double activationFn(double x);
-		static double activationFnDeriv(double x);
-		static double softmaxDeriv(double x, double targetVal);
-		static double randomWeight(void) { return rand() / double(RAND_MAX); }
-		double sumDerivOfWeight(const Layer &nextLayer) const;
-		double p_outputVal;
-		vector<Connection> p_outputWeights;
-		uint p_neuronIndex;
-		double p_gradient;
-		static double learningRate;
-		static double alpha;
-		bool neuron_softmax;
-};
+  private:
+    struct DenseLayer {
+        std::vector<std::vector<double>> weights;
+        std::vector<double> biases;
+        ActivationType activation;
 
-class TrainingData {
-    public:
-        TrainingData(const string filename);
-        bool isEof(void) { return p_file.eof(); }
-        
-        // Number of inputs read from the file
-        uint getInputs(vector<double> &inputVals);
-        uint getGroundTruth(vector<double> &targetOutputVals);
-        
-        void genData(const string filename);
-    private:
-        ifstream p_file;
-};
+        std::vector<double> inputCache;
+        std::vector<double> outputCache;
+    };
 
-class DataFileReader {
-    public:
-        DataFileReader(string inname, string outname);
-        void getInputs(uint numPictures, vector<double> &arr);
-        void getLabels(uint numLabels, vector<double> &arr);
-        void getCurrentTruthArray(int epoch, vector<double> &outputVector, vector<double> &currentTruth);
-        int reverseInt(int i);
-        int getnImages() { return nImages; }
+    std::vector<DenseLayer> layers;
+    double lr;
+    std::vector<uint> layerShape;
+    std::vector<ActivationType> layerActivations;
 
-    private:
-        string inFileName;
-        string outFileName;
-        
-        ifstream inFile;
-        ifstream outFile;
+    static double activate(double x, ActivationType type);
+    static double activationDerivativeFromOutput(double activatedValue,
+                                                 ActivationType type);
+    static std::vector<double> softmax(const std::vector<double> &z);
+    static std::string activationToString(ActivationType type);
+    static ActivationType activationFromString(const std::string &name);
 
-        const uint inMagic = 2051;
-        const uint groundMagic = 2049;
-
-        const uint blackThreshold = 128;
-
-        int nImages;
+    std::vector<double> forwardInternal(const std::vector<double> &input);
+    double backwardAndUpdate(const std::vector<double> &target);
 };
 
 #endif

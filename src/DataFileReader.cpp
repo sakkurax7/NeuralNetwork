@@ -1,97 +1,111 @@
 #include "global_neuralnetwork.hpp"
 
-DataFileReader::DataFileReader(string inname, string outname) {
-    this->inFileName = inname;
-    this->outFileName = outname;
-    this->nImages = 0;
-    inFile.open(this->inFileName, ios::in|ios::binary|ios::ate );
-    if(inFile.fail())
-        cout << "Error opening infile!" << endl;
-    outFile.open(this->outFileName, ios::in|ios::binary|ios::ate );
-    if(outFile.fail())
-        cout << "Error opening outfile" << endl;
-}
+#include <algorithm>
+#include <fstream>
+#include <stdexcept>
 
-int DataFileReader::reverseInt(int i) {
-    unsigned char c1, c2, c3, c4;
-    c1 = i & 255;
-    c2 = (i >> 8) & 255;
-    c3 = (i >> 16) & 255;
-    c4 = (i >> 24) & 255;
-
-    return ((int)c1 << 24) + ((int)c2 << 16) + ((int)c3 << 8) + c4;
-}
-
-void DataFileReader::getInputs(uint numPictures, vector<double> &arr) {
-    int magicNumber = 0, numImages = 0, numRows = 0, numCols = 0;
-    int size = 0;
-
-    inFile.seekg(0, ios::end); // set pointer to end of file
-    size = inFile.tellg(); // length of file
-    cout << "Size of file: " << size << endl;
-    inFile.seekg(0, ios::beg); // set pointer to beginning of file
-
-    // Magic number
-    inFile.read((char*)&magicNumber, sizeof(this->inMagic));
-    magicNumber = reverseInt(magicNumber);
-    cout << "Magic number: " << magicNumber << endl;
-
-    // Number of images
-    inFile.read((char*)&numImages, sizeof(this->inMagic));
-    numImages = reverseInt(numImages);
-    this->nImages = numImages;
-    cout << "Number of images: " << numImages << endl;
-
-    if(numPictures > numImages) { throw runtime_error("Number of requested images exceeds number of iamges in dataset!"); }
-
-    // Row & cols
-    inFile.read((char*)&numRows, sizeof(this->inMagic));
-    inFile.read((char*)&numCols, sizeof(this->inMagic));
-    numRows = reverseInt(numRows);
-    numCols = reverseInt(numCols);
-    cout << "Rows: " << numRows << " cols: " << numCols << endl;
-
-    for (int i = 0; i<numRows*numCols*numPictures; i++) {
-        int temp = 0;
-        inFile.read((char*)&temp, 1);
-        temp = (temp >= this->blackThreshold) ? temp = 1 : temp = 0; // Threshold
-        arr.push_back(temp);
+namespace {
+std::uint32_t readBigEndianUInt32(std::ifstream &stream) {
+    unsigned char bytes[4];
+    stream.read(reinterpret_cast<char *>(bytes), 4);
+    if (!stream) {
+        throw std::runtime_error("Failed to read IDX header");
     }
+
+    return (static_cast<std::uint32_t>(bytes[0]) << 24) |
+           (static_cast<std::uint32_t>(bytes[1]) << 16) |
+           (static_cast<std::uint32_t>(bytes[2]) << 8) |
+           static_cast<std::uint32_t>(bytes[3]);
+}
+} // namespace
+
+MnistDataset MnistDataset::load(const std::string &imagesPath,
+                                const std::string &labelsPath,
+                                std::size_t limit) {
+    std::ifstream images(imagesPath, std::ios::binary);
+    if (!images) {
+        throw std::runtime_error("Unable to open images file: " + imagesPath);
+    }
+
+    std::ifstream labels(labelsPath, std::ios::binary);
+    if (!labels) {
+        throw std::runtime_error("Unable to open labels file: " + labelsPath);
+    }
+
+    const std::uint32_t imageMagic = readBigEndianUInt32(images);
+    const std::uint32_t imageCount = readBigEndianUInt32(images);
+    const std::uint32_t rows = readBigEndianUInt32(images);
+    const std::uint32_t cols = readBigEndianUInt32(images);
+
+    const std::uint32_t labelMagic = readBigEndianUInt32(labels);
+    const std::uint32_t labelCount = readBigEndianUInt32(labels);
+
+    if (imageMagic != 2051) {
+        throw std::runtime_error("Invalid image file magic number (expected 2051)");
+    }
+    if (labelMagic != 2049) {
+        throw std::runtime_error("Invalid label file magic number (expected 2049)");
+    }
+
+    const std::size_t available = static_cast<std::size_t>(std::min(imageCount, labelCount));
+    if (available == 0) {
+        throw std::runtime_error("MNIST files contain zero samples");
+    }
+
+    const std::size_t toRead = (limit == 0 || limit > available) ? available : limit;
+    const std::size_t pixelsPerImage = static_cast<std::size_t>(rows) * cols;
+
+    MnistDataset dataset;
+    dataset.samples.reserve(toRead);
+
+    for (std::size_t idx = 0; idx < toRead; ++idx) {
+        MnistSample sample;
+        sample.pixels.resize(pixelsPerImage);
+
+        for (std::size_t p = 0; p < pixelsPerImage; ++p) {
+            unsigned char pixel = 0;
+            images.read(reinterpret_cast<char *>(&pixel), 1);
+            if (!images) {
+                throw std::runtime_error("Unexpected end of image file");
+            }
+            sample.pixels[p] = static_cast<double>(pixel) / 255.0;
+        }
+
+        unsigned char label = 0;
+        labels.read(reinterpret_cast<char *>(&label), 1);
+        if (!labels) {
+            throw std::runtime_error("Unexpected end of labels file");
+        }
+
+        sample.label = label;
+        dataset.samples.push_back(std::move(sample));
+    }
+
+    return dataset;
 }
 
-void DataFileReader::getLabels(uint numLabels, vector<double> &arr) {
-    int magicNumber = 0, readLabels = 0, size = 0; 
-
-    outFile.seekg(0, ios::end); // set pointer to end of file
-    size = outFile.tellg(); // length of file
-    outFile.seekg(0, ios::beg); // set pointer to beginning of file
-
-    // Magic number
-    outFile.read((char*)&magicNumber, sizeof(this->inMagic));
-    magicNumber = reverseInt(magicNumber);
-
-    // Number of labels
-    outFile.read((char*)&readLabels, sizeof(this->inMagic));
-    readLabels = reverseInt(readLabels);
-
-    if(numLabels > readLabels) { throw runtime_error("Number of requested labels exceeds number of labels in dataset!"); }
-
-    
-    for(int i = 0; i<numLabels; i++){
-        int temp = 0;
-        outFile.read((char*)&temp, 1);
-        arr.push_back(temp);
-    }
+std::size_t MnistDataset::size() const {
+    return samples.size();
 }
 
-void DataFileReader::getCurrentTruthArray(int epoch, vector<double> &outputVector, vector<double> &currentTruth) {
-    currentTruth.clear();
-
-    int truth = outputVector[epoch];
-    for(int i = 0; i<=9; i++) {
-        if (i == truth) 
-            currentTruth.push_back(1.0);
-        else
-            currentTruth.push_back(0.0);
+const MnistSample &MnistDataset::operator[](std::size_t index) const {
+    if (index >= samples.size()) {
+        throw std::out_of_range("Sample index out of range");
     }
+    return samples[index];
+}
+
+std::vector<double> MnistDataset::oneHotLabel(std::size_t index, std::size_t classes) const {
+    if (classes == 0) {
+        throw std::invalid_argument("Class count must be greater than zero");
+    }
+
+    const MnistSample &sample = (*this)[index];
+    if (sample.label >= classes) {
+        throw std::runtime_error("Label exceeds provided class count");
+    }
+
+    std::vector<double> target(classes, 0.0);
+    target[sample.label] = 1.0;
+    return target;
 }
