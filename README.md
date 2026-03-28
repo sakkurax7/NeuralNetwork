@@ -92,3 +92,4 @@ python3 tools/image_to_mnist.py digit.jpg my_digit.idx --label 3 --output-labels
 - The default network topology in `src/main.cpp` is `784 -> 128 -> 64 -> 10`.
 - Current model file format is a human-readable text format (`NN_MODEL_V1`).
 - The converter script requires Pillow (`pip install pillow`).
+- `Model_99.56-acc_27Mar2026.nn` is the current best version of the network, with 99.56% accuracy on the training data.
