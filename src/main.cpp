@@ -5,9 +5,12 @@
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -18,8 +21,52 @@
 namespace {
 volatile std::sig_atomic_t g_stopRequested = 0;
 
+enum class ModelType {
+    Dense,
+    Cnn,
+};
+
 void handleSignal(int) {
     g_stopRequested = 1;
+}
+
+ModelType parseModelType(const std::string &value) {
+    std::string normalized = value;
+    std::transform(normalized.begin(),
+                   normalized.end(),
+                   normalized.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+
+    if (normalized == "dense") {
+        return ModelType::Dense;
+    }
+    if (normalized == "cnn") {
+        return ModelType::Cnn;
+    }
+    throw std::invalid_argument("Unknown model type: " + value + " (expected dense or cnn)");
+}
+
+std::string modelTypeToString(ModelType type) {
+    return type == ModelType::Dense ? "dense" : "cnn";
+}
+
+ModelType detectModelTypeFromFile(const std::string &modelPath) {
+    std::ifstream in(modelPath);
+    if (!in) {
+        throw std::runtime_error("Unable to open model file: " + modelPath);
+    }
+
+    std::string magic;
+    in >> magic;
+    if (magic == "NN_MODEL_V1") {
+        return ModelType::Dense;
+    }
+    if (magic == "CNN_MODEL_V1") {
+        return ModelType::Cnn;
+    }
+
+    throw std::runtime_error(
+        "Unsupported model file format. Expected NN_MODEL_V1 or CNN_MODEL_V1");
 }
 
 struct TrainConfig {
@@ -35,6 +82,9 @@ struct TrainConfig {
     std::size_t checkpointEvery = 1;
     std::uint32_t seed = 42;
     std::string resumeModelPath = "";
+    ModelType modelType = ModelType::Dense;
+    bool hasModelTypeOverride = false;
+
     std::vector<uint> topology = {784, 128, 64, 10};
     std::vector<ActivationType> activations = {
         ActivationType::ReLU,
@@ -43,6 +93,14 @@ struct TrainConfig {
     };
     bool hasTopologyOverride = false;
     bool hasActivationOverride = false;
+
+    std::size_t imageRows = 28;
+    std::size_t imageCols = 28;
+    std::size_t cnnFilters = 8;
+    std::size_t cnnKernelSize = 5;
+    std::size_t cnnHiddenUnits = 64;
+    bool hasCnnHyperparamOverride = false;
+    bool hasImageShapeOverride = false;
 };
 
 struct PredictConfig {
@@ -53,28 +111,38 @@ struct PredictConfig {
 };
 
 void printUsage(const char *exeName) {
-    std::cout << "Usage:\n"
-              << "  " << exeName
-              << " train [images] [labels] [model_out] [epochs] [learning_rate] [sample_limit] [validation_split] [options]\n"
-              << "  " << exeName
-              << " predict [model] [images] [sample_index] [labels_optional]\n\n"
-              << "Train options:\n"
-              << "  --target-val-acc <float>       Stop when val accuracy reaches this value (default 1.0)\n"
-              << "  --early-stop-patience <int>    Stop if val acc does not improve for N epochs (default 0=off)\n"
-              << "  --checkpoint-every <int>       Save weights every N epochs (default 1)\n"
-              << "  --resume <model_path>          Load existing weights before training\n"
-              << "  --seed <int>                   RNG seed for deterministic split/shuffle (default 42)\n"
-              << "  --topology <csv>              Layer sizes (example: 784,256,128,10)\n"
-              << "  --activations <csv>           Activations per non-input layer\n"
-              << "                                (example: relu,relu,softmax)\n\n"
-              << "Examples:\n"
-              << "  " << exeName
-              << " train images labels model.nn 20 0.01 60000 0.1 --target-val-acc 0.995 --early-stop-patience 3\n"
-              << "  " << exeName
-              << " train images labels model.nn 15 0.005 60000 0.1 --topology 784,256,10 --activations relu,softmax\n"
-              << "  " << exeName << " train images labels model.nn 10 0.005 0 0.1 --resume model.nn\n"
-              << "  " << exeName << " predict model.nn images 42 labels\n"
-              << "  " << exeName << " predict model.nn images 42\n";
+    std::cout
+        << "Usage:\n"
+        << "  " << exeName
+        << " train [images] [labels] [model_out] [epochs] [learning_rate] [sample_limit] [validation_split] [options]\n"
+        << "  " << exeName
+        << " predict [model] [images] [sample_index] [labels_optional]\n\n"
+        << "Train options:\n"
+        << "  --model-type <dense|cnn>       Model architecture family (default dense)\n"
+        << "  --target-val-acc <float>       Stop when val accuracy reaches this value (default 1.0)\n"
+        << "  --early-stop-patience <int>    Stop if val acc does not improve for N epochs (default 0=off)\n"
+        << "  --checkpoint-every <int>       Save weights every N epochs (default 1)\n"
+        << "  --resume <model_path>          Load existing weights before training\n"
+        << "  --seed <int>                   RNG seed for deterministic split/shuffle (default 42)\n"
+        << "  --topology <csv>               Dense-only: layer sizes (example: 784,256,128,10)\n"
+        << "  --activations <csv>            Dense-only: activations per non-input layer\n"
+        << "                                 (example: relu,relu,softmax)\n"
+        << "  --cnn-filters <int>            CNN-only: number of convolution filters (default 8)\n"
+        << "  --cnn-kernel-size <int>        CNN-only: square kernel size (default 5)\n"
+        << "  --cnn-hidden-units <int>       CNN-only: hidden dense units after pooling (default 64)\n"
+        << "  --image-rows <int>             CNN-only: input image rows (default 28)\n"
+        << "  --image-cols <int>             CNN-only: input image columns (default 28)\n\n"
+        << "Examples:\n"
+        << "  " << exeName
+        << " train images labels model.nn 20 0.01 60000 0.1 --target-val-acc 0.995 --early-stop-patience 3\n"
+        << "  " << exeName
+        << " train images labels model.nn 15 0.005 60000 0.1 --topology 784,256,10 --activations relu,softmax\n"
+        << "  " << exeName
+        << " train images labels cnn_model.nn 15 0.005 60000 0.1 --model-type cnn --cnn-filters 16 --cnn-hidden-units 128\n"
+        << "  " << exeName
+        << " train images labels model.nn 10 0.005 0 0.1 --resume model.nn\n"
+        << "  " << exeName << " predict model.nn images 42 labels\n"
+        << "  " << exeName << " predict model.nn images 42\n";
 }
 
 bool isOptionToken(const std::string &arg) {
@@ -167,7 +235,10 @@ std::string formatActivations(const std::vector<ActivationType> &activations) {
     return out.str();
 }
 
-std::string requireOptionValue(int argc, char **argv, int &i, const std::string &optionName) {
+std::string requireOptionValue(int argc,
+                               char **argv,
+                               int &i,
+                               const std::string &optionName) {
     if (i + 1 >= argc) {
         throw std::invalid_argument("Missing value for " + optionName);
     }
@@ -186,7 +257,7 @@ TrainConfig parseTrainConfig(int argc, char **argv) {
         positional.push_back(arg);
     }
 
-    if (positional.size() > 0) {
+    if (!positional.empty()) {
         cfg.imagesPath = positional[0];
     }
     if (positional.size() > 1) {
@@ -213,21 +284,26 @@ TrainConfig parseTrainConfig(int argc, char **argv) {
 
     for (; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--target-val-acc") {
-            cfg.targetValAccuracy = std::stod(requireOptionValue(argc, argv, i, "--target-val-acc"));
+        if (arg == "--model-type") {
+            cfg.modelType = parseModelType(requireOptionValue(argc, argv, i, "--model-type"));
+            cfg.hasModelTypeOverride = true;
+        } else if (arg == "--target-val-acc") {
+            cfg.targetValAccuracy =
+                std::stod(requireOptionValue(argc, argv, i, "--target-val-acc"));
         } else if (arg == "--early-stop-patience") {
-            cfg.earlyStopPatience =
-                static_cast<std::size_t>(std::stoul(requireOptionValue(argc, argv, i, "--early-stop-patience")));
+            cfg.earlyStopPatience = static_cast<std::size_t>(
+                std::stoul(requireOptionValue(argc, argv, i, "--early-stop-patience")));
         } else if (arg == "--checkpoint-every") {
-            cfg.checkpointEvery =
-                static_cast<std::size_t>(std::stoul(requireOptionValue(argc, argv, i, "--checkpoint-every")));
+            cfg.checkpointEvery = static_cast<std::size_t>(
+                std::stoul(requireOptionValue(argc, argv, i, "--checkpoint-every")));
             if (cfg.checkpointEvery == 0) {
                 throw std::invalid_argument("--checkpoint-every must be >= 1");
             }
         } else if (arg == "--resume") {
             cfg.resumeModelPath = requireOptionValue(argc, argv, i, "--resume");
         } else if (arg == "--seed") {
-            cfg.seed = static_cast<std::uint32_t>(std::stoul(requireOptionValue(argc, argv, i, "--seed")));
+            cfg.seed = static_cast<std::uint32_t>(
+                std::stoul(requireOptionValue(argc, argv, i, "--seed")));
         } else if (arg == "--topology") {
             cfg.topology = parseTopologyCsv(requireOptionValue(argc, argv, i, "--topology"));
             cfg.hasTopologyOverride = true;
@@ -235,6 +311,26 @@ TrainConfig parseTrainConfig(int argc, char **argv) {
             cfg.activations =
                 parseActivationsCsv(requireOptionValue(argc, argv, i, "--activations"));
             cfg.hasActivationOverride = true;
+        } else if (arg == "--cnn-filters") {
+            cfg.cnnFilters = static_cast<std::size_t>(
+                std::stoul(requireOptionValue(argc, argv, i, "--cnn-filters")));
+            cfg.hasCnnHyperparamOverride = true;
+        } else if (arg == "--cnn-kernel-size") {
+            cfg.cnnKernelSize = static_cast<std::size_t>(
+                std::stoul(requireOptionValue(argc, argv, i, "--cnn-kernel-size")));
+            cfg.hasCnnHyperparamOverride = true;
+        } else if (arg == "--cnn-hidden-units") {
+            cfg.cnnHiddenUnits = static_cast<std::size_t>(
+                std::stoul(requireOptionValue(argc, argv, i, "--cnn-hidden-units")));
+            cfg.hasCnnHyperparamOverride = true;
+        } else if (arg == "--image-rows") {
+            cfg.imageRows = static_cast<std::size_t>(
+                std::stoul(requireOptionValue(argc, argv, i, "--image-rows")));
+            cfg.hasImageShapeOverride = true;
+        } else if (arg == "--image-cols") {
+            cfg.imageCols = static_cast<std::size_t>(
+                std::stoul(requireOptionValue(argc, argv, i, "--image-cols")));
+            cfg.hasImageShapeOverride = true;
         } else {
             throw std::invalid_argument("Unknown train option: " + arg);
         }
@@ -244,17 +340,36 @@ TrainConfig parseTrainConfig(int argc, char **argv) {
         throw std::invalid_argument(
             "learning_rate must be greater than zero when starting a new model");
     }
-    if (cfg.topology.size() < 2) {
-        throw std::invalid_argument("Topology must contain at least 2 layers");
-    }
-    if (cfg.activations.size() != cfg.topology.size() - 1) {
-        throw std::invalid_argument("Activation count must match topology layer count minus one");
-    }
     if (cfg.validationSplit < 0.0 || cfg.validationSplit >= 1.0) {
         throw std::invalid_argument("validation_split must be in [0.0, 1.0)");
     }
     if (cfg.targetValAccuracy < 0.0 || cfg.targetValAccuracy > 1.0) {
         throw std::invalid_argument("--target-val-acc must be in [0.0, 1.0]");
+    }
+
+    if (cfg.modelType == ModelType::Dense) {
+        if (cfg.topology.size() < 2) {
+            throw std::invalid_argument("Topology must contain at least 2 layers");
+        }
+        if (cfg.activations.size() != cfg.topology.size() - 1) {
+            throw std::invalid_argument("Activation count must match topology layer count minus one");
+        }
+        if (cfg.hasCnnHyperparamOverride || cfg.hasImageShapeOverride) {
+            throw std::invalid_argument(
+                "--cnn-* and --image-* options require --model-type cnn");
+        }
+    } else {
+        if (cfg.hasTopologyOverride || cfg.hasActivationOverride) {
+            throw std::invalid_argument(
+                "--topology/--activations are only supported with --model-type dense");
+        }
+        if (cfg.cnnFilters == 0 || cfg.cnnKernelSize == 0 || cfg.cnnHiddenUnits == 0) {
+            throw std::invalid_argument(
+                "CNN hyperparameters must be greater than zero");
+        }
+        if (cfg.imageRows == 0 || cfg.imageCols == 0) {
+            throw std::invalid_argument("CNN input image dimensions must be greater than zero");
+        }
     }
 
     return cfg;
@@ -277,9 +392,10 @@ PredictConfig parsePredictConfig(int argc, char **argv) {
     return cfg;
 }
 
-double evaluateAccuracy(NeuralNetwork &net,
-                        const MnistDataset &dataset,
-                        const std::vector<std::size_t> &indices) {
+double evaluateAccuracy(
+    const MnistDataset &dataset,
+    const std::vector<std::size_t> &indices,
+    const std::function<std::uint8_t(const std::vector<double> &)> &predictClassFn) {
     if (indices.empty()) {
         return 0.0;
     }
@@ -287,7 +403,7 @@ double evaluateAccuracy(NeuralNetwork &net,
     std::size_t correct = 0;
     for (std::size_t idx : indices) {
         const MnistSample &sample = dataset[idx];
-        if (net.predictClass(sample.pixels) == sample.label) {
+        if (predictClassFn(sample.pixels) == sample.label) {
             ++correct;
         }
     }
@@ -295,7 +411,9 @@ double evaluateAccuracy(NeuralNetwork &net,
     return static_cast<double>(correct) / static_cast<double>(indices.size());
 }
 
-bool shouldSaveCheckpoint(std::size_t epochIndex, std::size_t checkpointEvery, std::size_t totalEpochs) {
+bool shouldSaveCheckpoint(std::size_t epochIndex,
+                          std::size_t checkpointEvery,
+                          std::size_t totalEpochs) {
     if ((epochIndex + 1) % checkpointEvery == 0) {
         return true;
     }
@@ -314,26 +432,111 @@ void runTrainMode(const TrainConfig &cfg) {
     if (dataset.size() < 2) {
         throw std::runtime_error("Need at least 2 samples to run train/validation split");
     }
-    if (!cfg.resumeModelPath.empty() && (cfg.hasTopologyOverride || cfg.hasActivationOverride)) {
+
+    ModelType effectiveModelType = cfg.modelType;
+    if (!cfg.resumeModelPath.empty()) {
+        const ModelType resumedModelType = detectModelTypeFromFile(cfg.resumeModelPath);
+        if (cfg.hasModelTypeOverride && resumedModelType != cfg.modelType) {
+            throw std::invalid_argument(
+                "--model-type does not match the architecture saved in --resume model");
+        }
+        effectiveModelType = resumedModelType;
+    }
+
+    if (effectiveModelType == ModelType::Dense &&
+        !cfg.resumeModelPath.empty() &&
+        (cfg.hasTopologyOverride || cfg.hasActivationOverride)) {
         throw std::invalid_argument("--topology/--activations cannot be used together with --resume");
     }
-
-    NeuralNetwork net = cfg.resumeModelPath.empty() ? NeuralNetwork(cfg.topology, cfg.activations, cfg.learningRate)
-                                                    : NeuralNetwork::loadModel(cfg.resumeModelPath, cfg.learningRate);
-
-    if (!cfg.resumeModelPath.empty()) {
-        std::cout << "Resumed from model: '" << cfg.resumeModelPath << "'" << std::endl;
+    if (effectiveModelType == ModelType::Cnn &&
+        !cfg.resumeModelPath.empty() &&
+        (cfg.hasCnnHyperparamOverride || cfg.hasImageShapeOverride)) {
+        throw std::invalid_argument("--cnn-* and --image-* cannot be used together with --resume");
     }
-    std::cout << "Training topology: " << formatTopology(net.getTopology()) << std::endl;
-    std::cout << "Activations: " << formatActivations(net.getActivations()) << std::endl;
 
-    const std::size_t outputClasses = net.getTopology().back();
+    const std::size_t inputSize = dataset[0].pixels.size();
+    std::size_t outputClasses = 0;
+
+    std::unique_ptr<NeuralNetwork> denseNet;
+    std::unique_ptr<ConvolutionalNeuralNetwork> cnnNet;
+
+    std::function<double(const std::vector<double> &, const std::vector<double> &)> trainSampleFn;
+    std::function<std::uint8_t(const std::vector<double> &)> predictClassFn;
+    std::function<void(const std::string &)> saveModelFn;
+
+    if (effectiveModelType == ModelType::Dense) {
+        denseNet = cfg.resumeModelPath.empty()
+                       ? std::make_unique<NeuralNetwork>(cfg.topology, cfg.activations, cfg.learningRate)
+                       : std::make_unique<NeuralNetwork>(
+                             NeuralNetwork::loadModel(cfg.resumeModelPath, cfg.learningRate));
+
+        if (!cfg.resumeModelPath.empty()) {
+            std::cout << "Resumed from model: '" << cfg.resumeModelPath << "'" << std::endl;
+        }
+
+        if (denseNet->getTopology().front() != inputSize) {
+            throw std::invalid_argument(
+                "Dense model input size does not match MNIST sample size");
+        }
+
+        outputClasses = denseNet->getTopology().back();
+        std::cout << "Model type: dense" << std::endl;
+        std::cout << "Training topology: " << formatTopology(denseNet->getTopology()) << std::endl;
+        std::cout << "Activations: " << formatActivations(denseNet->getActivations()) << std::endl;
+
+        trainSampleFn = [&](const std::vector<double> &input, const std::vector<double> &target) {
+            return denseNet->trainSample(input, target);
+        };
+        predictClassFn = [&](const std::vector<double> &input) {
+            return denseNet->predictClass(input);
+        };
+        saveModelFn = [&](const std::string &path) {
+            denseNet->saveModel(path);
+        };
+    } else {
+        cnnNet = cfg.resumeModelPath.empty()
+                     ? std::make_unique<ConvolutionalNeuralNetwork>(cfg.imageRows,
+                                                                    cfg.imageCols,
+                                                                    cfg.cnnFilters,
+                                                                    cfg.cnnKernelSize,
+                                                                    cfg.cnnHiddenUnits,
+                                                                    10,
+                                                                    cfg.learningRate)
+                     : std::make_unique<ConvolutionalNeuralNetwork>(
+                           ConvolutionalNeuralNetwork::loadModel(cfg.resumeModelPath,
+                                                                 cfg.learningRate));
+
+        if (!cfg.resumeModelPath.empty()) {
+            std::cout << "Resumed from model: '" << cfg.resumeModelPath << "'" << std::endl;
+        }
+
+        if (cnnNet->getInputSize() != inputSize) {
+            throw std::invalid_argument(
+                "CNN model input size does not match MNIST sample size. "
+                "Check --image-rows/--image-cols or resume model dimensions.");
+        }
+
+        outputClasses = cnnNet->getOutputClasses();
+        std::cout << "Model type: cnn" << std::endl;
+        std::cout << "Architecture: " << cnnNet->architectureSummary() << std::endl;
+
+        trainSampleFn = [&](const std::vector<double> &input, const std::vector<double> &target) {
+            return cnnNet->trainSample(input, target);
+        };
+        predictClassFn = [&](const std::vector<double> &input) {
+            return cnnNet->predictClass(input);
+        };
+        saveModelFn = [&](const std::string &path) {
+            cnnNet->saveModel(path);
+        };
+    }
+
     if (outputClasses == 0) {
         throw std::runtime_error("Output layer must have at least one neuron");
     }
     if (outputClasses < 10) {
         throw std::invalid_argument(
-            "MNIST labels require output layer size >= 10. Increase --topology output width.");
+            "MNIST labels require output layer size >= 10.");
     }
 
     std::vector<std::size_t> allIndices(dataset.size());
@@ -361,7 +564,7 @@ void runTrainMode(const TrainConfig &cfg) {
     for (std::size_t epoch = 0; epoch < cfg.epochs; ++epoch) {
         if (g_stopRequested) {
             std::cout << "\nStop requested before epoch start. Saving model..." << std::endl;
-            net.saveModel(cfg.modelOutputPath);
+            saveModelFn(cfg.modelOutputPath);
             std::cout << "Saved model to '" << cfg.modelOutputPath << "'" << std::endl;
             return;
         }
@@ -373,19 +576,19 @@ void runTrainMode(const TrainConfig &cfg) {
             const std::size_t idx = trainIndices[samplePos];
             const MnistSample &sample = dataset[idx];
             const std::vector<double> target = dataset.oneHotLabel(idx, outputClasses);
-            trainLoss += net.trainSample(sample.pixels, target);
+            trainLoss += trainSampleFn(sample.pixels, target);
 
             if (g_stopRequested) {
                 std::cout << "\nStop requested during epoch. Saving model..." << std::endl;
-                net.saveModel(cfg.modelOutputPath);
+                saveModelFn(cfg.modelOutputPath);
                 std::cout << "Saved model to '" << cfg.modelOutputPath << "'" << std::endl;
                 return;
             }
         }
         trainLoss /= static_cast<double>(trainIndices.size());
 
-        const double trainAcc = evaluateAccuracy(net, dataset, trainIndices);
-        const double valAcc = evaluateAccuracy(net, dataset, validationIndices);
+        const double trainAcc = evaluateAccuracy(dataset, trainIndices, predictClassFn);
+        const double valAcc = evaluateAccuracy(dataset, validationIndices, predictClassFn);
 
         std::cout << "Epoch " << (epoch + 1) << "/" << cfg.epochs
                   << " - train_loss: " << trainLoss
@@ -394,7 +597,7 @@ void runTrainMode(const TrainConfig &cfg) {
                   << std::defaultfloat << std::endl;
 
         if (shouldSaveCheckpoint(epoch, cfg.checkpointEvery, cfg.epochs)) {
-            net.saveModel(cfg.modelOutputPath);
+            saveModelFn(cfg.modelOutputPath);
             std::cout << "Checkpoint saved to '" << cfg.modelOutputPath << "'" << std::endl;
         }
 
@@ -418,12 +621,12 @@ void runTrainMode(const TrainConfig &cfg) {
         }
     }
 
-    net.saveModel(cfg.modelOutputPath);
+    saveModelFn(cfg.modelOutputPath);
     std::cout << "Saved final model to '" << cfg.modelOutputPath << "'" << std::endl;
 }
 
 void runPredictMode(const PredictConfig &cfg) {
-    NeuralNetwork net = NeuralNetwork::loadModel(cfg.modelPath, 0.0);
+    const ModelType modelType = detectModelTypeFromFile(cfg.modelPath);
     const bool hasLabels = !cfg.labelsPath.empty();
     const MnistDataset dataset =
         hasLabels ? MnistDataset::load(cfg.imagesPath, cfg.labelsPath, 0)
@@ -434,10 +637,22 @@ void runPredictMode(const PredictConfig &cfg) {
     }
 
     const MnistSample &sample = dataset[cfg.sampleIndex];
-    const std::vector<double> probs = net.forward(sample.pixels);
-    const std::uint8_t predicted = net.predictClass(sample.pixels);
+    std::vector<double> probs;
+    std::uint8_t predicted = 0;
+
+    if (modelType == ModelType::Dense) {
+        NeuralNetwork net = NeuralNetwork::loadModel(cfg.modelPath, 0.0);
+        probs = net.forward(sample.pixels);
+        predicted = net.predictClass(sample.pixels);
+    } else {
+        ConvolutionalNeuralNetwork net =
+            ConvolutionalNeuralNetwork::loadModel(cfg.modelPath, 0.0);
+        probs = net.forward(sample.pixels);
+        predicted = net.predictClass(sample.pixels);
+    }
 
     std::cout << "Prediction for sample " << cfg.sampleIndex << ":\n";
+    std::cout << "  model_type: " << modelTypeToString(modelType) << "\n";
     std::cout << "  predicted_class: " << static_cast<int>(predicted) << "\n";
     if (hasLabels) {
         std::cout << "  true_label: " << static_cast<int>(sample.label) << "\n";

@@ -1,20 +1,22 @@
-# NeuralNetwork (MNIST Refactor)
+# NeuralNetwork
 
-A clean C++17 feed-forward neural network implementation focused on MNIST.
+A C++17 feed-forward neural network implementation.
 
 ## Features
-- Layer-based network implementation (easy to read and extend).
+- Layer-based implementation (easy to read and extend).
+- Supports two models:
+  - `dense` (fully connected feed-forward network)
+  - `cnn` (Conv -> MaxPool -> Dense -> Softmax)
 - Pluggable activations per layer:
   - `Sigmoid`
   - `Tanh`
   - `ReLU`
   - `Softmax` (output layer)
 - Configurable topology and activations from CLI (`--topology`, `--activations`).
-- Reusable network API for vector-based training/inference (library-style usage).
 - Stable softmax with cross-entropy training.
-- IDX MNIST reader for image/label binaries.
-- Train/validation split during training.
-- Model persistence (save/load learned weights).
+- IDX MNIST reader for images and labels.
+- Train and validation split during training.
+- Save and load learned weights.
 - Prediction mode using saved model weights.
 
 ## Build
@@ -37,13 +39,18 @@ Defaults:
 - `validation_split`: `0.1`
 
 Options:
+- `--model-type <dense|cnn>`: choose model architecture family (default `dense`)
 - `--target-val-acc <float>`: stop early when validation accuracy reaches this threshold (default `1.0`)
 - `--early-stop-patience <int>`: stop if validation accuracy does not improve for N epochs (default `0`, disabled)
 - `--checkpoint-every <int>`: save model every N epochs (default `1`)
 - `--resume <model_path>`: resume training from saved weights
 - `--seed <int>`: deterministic split/shuffle seed (default `42`)
-- `--topology <csv>`: layer widths, e.g. `784,256,128,10`
-- `--activations <csv>`: activation for each non-input layer, e.g. `relu,relu,softmax`
+- `--topology <csv>`: dense-only layer widths, e.g. `784,256,128,10`
+- `--activations <csv>`: dense-only activations, e.g. `relu,relu,softmax`
+- `--cnn-filters <int>`: cnn-only number of conv filters (default `8`)
+- `--cnn-kernel-size <int>`: cnn-only square kernel size (default `5`)
+- `--cnn-hidden-units <int>`: cnn-only hidden dense units after pooling (default `64`)
+- `--image-rows <int>` / `--image-cols <int>`: cnn-only input dimensions (default `28x28`)
 
 Example:
 ```bash
@@ -53,6 +60,11 @@ Example:
 Custom architecture example:
 ```bash
 ./bin/main train images labels model.nn 15 0.005 60000 0.1 --topology 784,256,10 --activations relu,softmax
+```
+
+CNN example:
+```bash
+./bin/main train images labels cnn_model.nn 15 0.005 60000 0.1 --model-type cnn --cnn-filters 16 --cnn-hidden-units 128
 ```
 
 Resume example:
@@ -99,7 +111,10 @@ python3 tools/image_to_mnist.py digit.jpg my_digit.idx --label 3 --output-labels
 ## Notes
 - MNIST image pixels are normalized to `[0, 1]`.
 - Default network topology is `784 -> 128 -> 64 -> 10`.
-- Current model file format is a human-readable text format (`NN_MODEL_V1`).
+- Default CNN architecture is `Conv(8, 5x5) -> MaxPool(2x2) -> Dense(64) -> Dense(10)`.
+- Model file formats are human-readable text:
+  - dense: `NN_MODEL_V1`
+  - cnn: `CNN_MODEL_V1`
 - The converter script requires Pillow (`pip install pillow`).
 
 ## Library-style API

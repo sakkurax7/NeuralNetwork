@@ -86,4 +86,63 @@ class NeuralNetwork {
     double backwardAndUpdate(const std::vector<double> &target);
 };
 
+class ConvolutionalNeuralNetwork {
+  public:
+    ConvolutionalNeuralNetwork(std::size_t inputRows,
+                               std::size_t inputCols,
+                               std::size_t filterCount,
+                               std::size_t kernelSize,
+                               std::size_t hiddenUnits,
+                               std::size_t outputClasses,
+                               double learningRate);
+
+    std::vector<double> run(const std::vector<double> &input);
+    std::vector<double> forward(const std::vector<double> &input);
+    double trainSample(const std::vector<double> &input,
+                       const std::vector<double> &target);
+    std::uint8_t predictClass(const std::vector<double> &input);
+    void setLearningRate(double learningRate);
+    double getLearningRate() const;
+    std::size_t getOutputClasses() const;
+    std::size_t getInputSize() const;
+    std::string architectureSummary() const;
+    void saveModel(const std::string &modelPath) const;
+    static ConvolutionalNeuralNetwork loadModel(const std::string &modelPath,
+                                                double learningRate);
+
+  private:
+    std::size_t inputRows;
+    std::size_t inputCols;
+    std::size_t filters;
+    std::size_t kernel;
+    std::size_t hidden;
+    std::size_t classes;
+    std::size_t convRows;
+    std::size_t convCols;
+    std::size_t poolRows;
+    std::size_t poolCols;
+    double lr;
+
+    std::vector<std::vector<double>> convKernels;
+    std::vector<double> convBiases;
+    std::vector<std::vector<double>> dense1Weights;
+    std::vector<double> dense1Biases;
+    std::vector<std::vector<double>> dense2Weights;
+    std::vector<double> dense2Biases;
+
+    std::vector<double> inputCache;
+    std::vector<std::vector<double>> convLinearCache;
+    std::vector<std::vector<double>> convActivatedCache;
+    std::vector<std::vector<double>> pooledCache;
+    std::vector<std::vector<std::size_t>> poolIndexCache;
+    std::vector<double> flattenedCache;
+    std::vector<double> hiddenLinearCache;
+    std::vector<double> hiddenActivatedCache;
+    std::vector<double> outputCache;
+
+    std::vector<double> forwardInternal(const std::vector<double> &input);
+    double backwardAndUpdate(const std::vector<double> &target);
+    static std::vector<double> softmax(const std::vector<double> &z);
+};
+
 #endif

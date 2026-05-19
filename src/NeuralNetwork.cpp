@@ -5,6 +5,7 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -479,4 +480,551 @@ ActivationType NeuralNetwork::activationFromString(const std::string &name) {
         return ActivationType::Softmax;
     }
     throw std::invalid_argument("Unknown activation name: " + name);
+}
+
+ConvolutionalNeuralNetwork::ConvolutionalNeuralNetwork(std::size_t inputRows,
+                                                       std::size_t inputCols,
+                                                       std::size_t filterCount,
+                                                       std::size_t kernelSize,
+                                                       std::size_t hiddenUnits,
+                                                       std::size_t outputClasses,
+                                                       double learningRate)
+    : inputRows(inputRows),
+      inputCols(inputCols),
+      filters(filterCount),
+      kernel(kernelSize),
+      hidden(hiddenUnits),
+      classes(outputClasses),
+      convRows(0),
+      convCols(0),
+      poolRows(0),
+      poolCols(0),
+      lr(learningRate) {
+    if (learningRate <= 0.0) {
+        throw std::invalid_argument("Learning rate must be greater than zero");
+    }
+    if (inputRows == 0 || inputCols == 0) {
+        throw std::invalid_argument("Input dimensions must be greater than zero");
+    }
+    if (filters == 0) {
+        throw std::invalid_argument("Filter count must be greater than zero");
+    }
+    if (kernel == 0) {
+        throw std::invalid_argument("Kernel size must be greater than zero");
+    }
+    if (hidden == 0) {
+        throw std::invalid_argument("Hidden layer size must be greater than zero");
+    }
+    if (classes == 0) {
+        throw std::invalid_argument("Output classes must be greater than zero");
+    }
+    if (kernel > inputRows || kernel > inputCols) {
+        throw std::invalid_argument("Kernel size must fit inside input dimensions");
+    }
+
+    convRows = inputRows - kernel + 1;
+    convCols = inputCols - kernel + 1;
+    poolRows = convRows / 2;
+    poolCols = convCols / 2;
+
+    if (poolRows == 0 || poolCols == 0) {
+        throw std::invalid_argument(
+            "Convolution output is too small for 2x2 max-pooling; adjust kernel/input dimensions");
+    }
+
+    const std::size_t kernelArea = kernel * kernel;
+    const std::size_t convArea = convRows * convCols;
+    const std::size_t poolArea = poolRows * poolCols;
+    const std::size_t flattenSize = filters * poolArea;
+
+    convKernels.assign(filters, std::vector<double>(kernelArea, 0.0));
+    convBiases.assign(filters, 0.0);
+    dense1Weights.assign(hidden, std::vector<double>(flattenSize, 0.0));
+    dense1Biases.assign(hidden, 0.0);
+    dense2Weights.assign(classes, std::vector<double>(hidden, 0.0));
+    dense2Biases.assign(classes, 0.0);
+
+    std::normal_distribution<double> convDist(0.0,
+                                              std::sqrt(2.0 / static_cast<double>(kernelArea)));
+    for (auto &kernelWeights : convKernels) {
+        for (double &weight : kernelWeights) {
+            weight = convDist(globalRng());
+        }
+    }
+
+    std::normal_distribution<double> dense1Dist(
+        0.0, std::sqrt(2.0 / static_cast<double>(flattenSize)));
+    for (auto &row : dense1Weights) {
+        for (double &weight : row) {
+            weight = dense1Dist(globalRng());
+        }
+    }
+
+    std::normal_distribution<double> dense2Dist(0.0,
+                                                std::sqrt(1.0 / static_cast<double>(hidden)));
+    for (auto &row : dense2Weights) {
+        for (double &weight : row) {
+            weight = dense2Dist(globalRng());
+        }
+    }
+
+    convLinearCache.assign(filters, std::vector<double>(convArea, 0.0));
+    convActivatedCache.assign(filters, std::vector<double>(convArea, 0.0));
+    pooledCache.assign(filters, std::vector<double>(poolArea, 0.0));
+    poolIndexCache.assign(filters, std::vector<std::size_t>(poolArea, 0));
+    flattenedCache.assign(flattenSize, 0.0);
+    hiddenLinearCache.assign(hidden, 0.0);
+    hiddenActivatedCache.assign(hidden, 0.0);
+    outputCache.assign(classes, 0.0);
+}
+
+std::vector<double> ConvolutionalNeuralNetwork::run(const std::vector<double> &input) {
+    return forwardInternal(input);
+}
+
+std::vector<double> ConvolutionalNeuralNetwork::forward(const std::vector<double> &input) {
+    return forwardInternal(input);
+}
+
+double ConvolutionalNeuralNetwork::trainSample(const std::vector<double> &input,
+                                               const std::vector<double> &target) {
+    forwardInternal(input);
+    return backwardAndUpdate(target);
+}
+
+std::uint8_t
+ConvolutionalNeuralNetwork::predictClass(const std::vector<double> &input) {
+    const std::vector<double> output = forward(input);
+    return static_cast<std::uint8_t>(
+        std::distance(output.begin(), std::max_element(output.begin(), output.end())));
+}
+
+void ConvolutionalNeuralNetwork::setLearningRate(double learningRate) {
+    if (learningRate <= 0.0) {
+        throw std::invalid_argument("Learning rate must be greater than zero");
+    }
+    lr = learningRate;
+}
+
+double ConvolutionalNeuralNetwork::getLearningRate() const {
+    return lr;
+}
+
+std::size_t ConvolutionalNeuralNetwork::getOutputClasses() const {
+    return classes;
+}
+
+std::size_t ConvolutionalNeuralNetwork::getInputSize() const {
+    return inputRows * inputCols;
+}
+
+std::string ConvolutionalNeuralNetwork::architectureSummary() const {
+    std::ostringstream out;
+    out << "Conv(filters=" << filters << ", kernel=" << kernel << "x" << kernel << ") -> "
+        << "MaxPool(2x2) -> Dense(" << hidden << ") -> Dense(" << classes << ")";
+    return out.str();
+}
+
+void ConvolutionalNeuralNetwork::saveModel(const std::string &modelPath) const {
+    std::ofstream out(modelPath);
+    if (!out) {
+        throw std::runtime_error("Unable to open model file for writing: " + modelPath);
+    }
+
+    out << "CNN_MODEL_V1\n";
+    out << "input_rows " << inputRows << "\n";
+    out << "input_cols " << inputCols << "\n";
+    out << "filters " << filters << "\n";
+    out << "kernel_size " << kernel << "\n";
+    out << "hidden_units " << hidden << "\n";
+    out << "output_classes " << classes << "\n";
+    out << std::setprecision(17);
+    out << "learning_rate " << lr << "\n";
+
+    out << "conv_kernels " << convKernels.size() << " "
+        << (convKernels.empty() ? 0 : convKernels[0].size()) << "\n";
+    for (const auto &kernelWeights : convKernels) {
+        for (double weight : kernelWeights) {
+            out << weight << " ";
+        }
+        out << "\n";
+    }
+
+    out << "conv_biases " << convBiases.size() << "\n";
+    for (double bias : convBiases) {
+        out << bias << " ";
+    }
+    out << "\n";
+
+    out << "dense1_weights " << dense1Weights.size() << " "
+        << (dense1Weights.empty() ? 0 : dense1Weights[0].size()) << "\n";
+    for (const auto &row : dense1Weights) {
+        for (double weight : row) {
+            out << weight << " ";
+        }
+        out << "\n";
+    }
+
+    out << "dense1_biases " << dense1Biases.size() << "\n";
+    for (double bias : dense1Biases) {
+        out << bias << " ";
+    }
+    out << "\n";
+
+    out << "dense2_weights " << dense2Weights.size() << " "
+        << (dense2Weights.empty() ? 0 : dense2Weights[0].size()) << "\n";
+    for (const auto &row : dense2Weights) {
+        for (double weight : row) {
+            out << weight << " ";
+        }
+        out << "\n";
+    }
+
+    out << "dense2_biases " << dense2Biases.size() << "\n";
+    for (double bias : dense2Biases) {
+        out << bias << " ";
+    }
+    out << "\n";
+}
+
+ConvolutionalNeuralNetwork
+ConvolutionalNeuralNetwork::loadModel(const std::string &modelPath,
+                                      double learningRate) {
+    std::ifstream in(modelPath);
+    if (!in) {
+        throw std::runtime_error("Unable to open model file: " + modelPath);
+    }
+
+    std::string magic;
+    in >> magic;
+    if (magic != "CNN_MODEL_V1") {
+        throw std::runtime_error("Unsupported CNN model file format");
+    }
+
+    std::string token;
+    std::size_t fileInputRows = 0;
+    std::size_t fileInputCols = 0;
+    std::size_t fileFilters = 0;
+    std::size_t fileKernel = 0;
+    std::size_t fileHidden = 0;
+    std::size_t fileClasses = 0;
+    double storedLearningRate = 0.0;
+
+    in >> token >> fileInputRows;
+    if (token != "input_rows") {
+        throw std::runtime_error("Invalid CNN model header: expected input_rows");
+    }
+    in >> token >> fileInputCols;
+    if (token != "input_cols") {
+        throw std::runtime_error("Invalid CNN model header: expected input_cols");
+    }
+    in >> token >> fileFilters;
+    if (token != "filters") {
+        throw std::runtime_error("Invalid CNN model header: expected filters");
+    }
+    in >> token >> fileKernel;
+    if (token != "kernel_size") {
+        throw std::runtime_error("Invalid CNN model header: expected kernel_size");
+    }
+    in >> token >> fileHidden;
+    if (token != "hidden_units") {
+        throw std::runtime_error("Invalid CNN model header: expected hidden_units");
+    }
+    in >> token >> fileClasses;
+    if (token != "output_classes") {
+        throw std::runtime_error("Invalid CNN model header: expected output_classes");
+    }
+    in >> token >> storedLearningRate;
+    if (token != "learning_rate") {
+        throw std::runtime_error("Invalid CNN model header: expected learning_rate");
+    }
+    if (storedLearningRate <= 0.0) {
+        throw std::runtime_error("Invalid stored learning rate in CNN model");
+    }
+
+    const double effectiveLearningRate = (learningRate > 0.0) ? learningRate : storedLearningRate;
+    ConvolutionalNeuralNetwork net(fileInputRows,
+                                   fileInputCols,
+                                   fileFilters,
+                                   fileKernel,
+                                   fileHidden,
+                                   fileClasses,
+                                   effectiveLearningRate);
+
+    std::size_t rowCount = 0;
+    std::size_t colCount = 0;
+
+    in >> token >> rowCount >> colCount;
+    if (token != "conv_kernels") {
+        throw std::runtime_error("Expected conv_kernels block");
+    }
+    if (rowCount != net.convKernels.size() ||
+        (!net.convKernels.empty() && colCount != net.convKernels[0].size())) {
+        throw std::runtime_error("CNN conv_kernels dimensions do not match architecture");
+    }
+    for (std::size_t r = 0; r < rowCount; ++r) {
+        for (std::size_t c = 0; c < colCount; ++c) {
+            in >> net.convKernels[r][c];
+        }
+    }
+
+    std::size_t biasCount = 0;
+    in >> token >> biasCount;
+    if (token != "conv_biases" || biasCount != net.convBiases.size()) {
+        throw std::runtime_error("CNN conv_biases block is invalid");
+    }
+    for (std::size_t i = 0; i < biasCount; ++i) {
+        in >> net.convBiases[i];
+    }
+
+    in >> token >> rowCount >> colCount;
+    if (token != "dense1_weights") {
+        throw std::runtime_error("Expected dense1_weights block");
+    }
+    if (rowCount != net.dense1Weights.size() ||
+        (!net.dense1Weights.empty() && colCount != net.dense1Weights[0].size())) {
+        throw std::runtime_error("CNN dense1_weights dimensions do not match architecture");
+    }
+    for (std::size_t r = 0; r < rowCount; ++r) {
+        for (std::size_t c = 0; c < colCount; ++c) {
+            in >> net.dense1Weights[r][c];
+        }
+    }
+
+    in >> token >> biasCount;
+    if (token != "dense1_biases" || biasCount != net.dense1Biases.size()) {
+        throw std::runtime_error("CNN dense1_biases block is invalid");
+    }
+    for (std::size_t i = 0; i < biasCount; ++i) {
+        in >> net.dense1Biases[i];
+    }
+
+    in >> token >> rowCount >> colCount;
+    if (token != "dense2_weights") {
+        throw std::runtime_error("Expected dense2_weights block");
+    }
+    if (rowCount != net.dense2Weights.size() ||
+        (!net.dense2Weights.empty() && colCount != net.dense2Weights[0].size())) {
+        throw std::runtime_error("CNN dense2_weights dimensions do not match architecture");
+    }
+    for (std::size_t r = 0; r < rowCount; ++r) {
+        for (std::size_t c = 0; c < colCount; ++c) {
+            in >> net.dense2Weights[r][c];
+        }
+    }
+
+    in >> token >> biasCount;
+    if (token != "dense2_biases" || biasCount != net.dense2Biases.size()) {
+        throw std::runtime_error("CNN dense2_biases block is invalid");
+    }
+    for (std::size_t i = 0; i < biasCount; ++i) {
+        in >> net.dense2Biases[i];
+    }
+
+    if (!in) {
+        throw std::runtime_error("CNN model file ended unexpectedly");
+    }
+
+    return net;
+}
+
+std::vector<double>
+ConvolutionalNeuralNetwork::forwardInternal(const std::vector<double> &input) {
+    if (input.size() != getInputSize()) {
+        throw std::invalid_argument("Input size does not match CNN input dimensions");
+    }
+
+    inputCache = input;
+    const std::size_t poolArea = poolRows * poolCols;
+
+    for (std::size_t filterIdx = 0; filterIdx < filters; ++filterIdx) {
+        const std::vector<double> &kernelWeights = convKernels[filterIdx];
+        std::vector<double> &convLinear = convLinearCache[filterIdx];
+        std::vector<double> &convActivated = convActivatedCache[filterIdx];
+        std::vector<double> &pooled = pooledCache[filterIdx];
+        std::vector<std::size_t> &poolIndex = poolIndexCache[filterIdx];
+
+        for (std::size_t r = 0; r < convRows; ++r) {
+            for (std::size_t c = 0; c < convCols; ++c) {
+                double sum = convBiases[filterIdx];
+                for (std::size_t kr = 0; kr < kernel; ++kr) {
+                    for (std::size_t kc = 0; kc < kernel; ++kc) {
+                        const std::size_t inputRow = r + kr;
+                        const std::size_t inputCol = c + kc;
+                        const std::size_t inputIdx = inputRow * inputCols + inputCol;
+                        const std::size_t kernelIdx = kr * kernel + kc;
+                        sum += kernelWeights[kernelIdx] * input[inputIdx];
+                    }
+                }
+
+                const std::size_t convIdx = r * convCols + c;
+                convLinear[convIdx] = sum;
+                convActivated[convIdx] = (sum > 0.0) ? sum : 0.0;
+            }
+        }
+
+        for (std::size_t pr = 0; pr < poolRows; ++pr) {
+            for (std::size_t pc = 0; pc < poolCols; ++pc) {
+                const std::size_t baseRow = pr * 2;
+                const std::size_t baseCol = pc * 2;
+                double maxValue = std::numeric_limits<double>::lowest();
+                std::size_t maxIndex = 0;
+
+                for (std::size_t dr = 0; dr < 2; ++dr) {
+                    for (std::size_t dc = 0; dc < 2; ++dc) {
+                        const std::size_t convRow = baseRow + dr;
+                        const std::size_t convCol = baseCol + dc;
+                        const std::size_t convIdx = convRow * convCols + convCol;
+                        const double candidate = convActivated[convIdx];
+                        if (candidate > maxValue) {
+                            maxValue = candidate;
+                            maxIndex = convIdx;
+                        }
+                    }
+                }
+
+                const std::size_t poolIdx = pr * poolCols + pc;
+                pooled[poolIdx] = maxValue;
+                poolIndex[poolIdx] = maxIndex;
+            }
+        }
+    }
+
+    for (std::size_t filterIdx = 0; filterIdx < filters; ++filterIdx) {
+        const std::size_t offset = filterIdx * poolArea;
+        for (std::size_t i = 0; i < poolArea; ++i) {
+            flattenedCache[offset + i] = pooledCache[filterIdx][i];
+        }
+    }
+
+    hiddenLinearCache = matVecMul(dense1Weights, flattenedCache, dense1Biases);
+    for (std::size_t i = 0; i < hiddenLinearCache.size(); ++i) {
+        hiddenActivatedCache[i] = (hiddenLinearCache[i] > 0.0) ? hiddenLinearCache[i] : 0.0;
+    }
+
+    const std::vector<double> logits = matVecMul(dense2Weights, hiddenActivatedCache, dense2Biases);
+    outputCache = softmax(logits);
+
+    return outputCache;
+}
+
+double ConvolutionalNeuralNetwork::backwardAndUpdate(const std::vector<double> &target) {
+    if (target.size() != classes) {
+        throw std::invalid_argument("Target size does not match CNN output classes");
+    }
+
+    const std::size_t flattenSize = flattenedCache.size();
+    const std::size_t convArea = convRows * convCols;
+    const std::size_t poolArea = poolRows * poolCols;
+
+    std::vector<double> deltaOutput(classes, 0.0);
+    for (std::size_t i = 0; i < classes; ++i) {
+        deltaOutput[i] = outputCache[i] - target[i];
+    }
+
+    std::vector<double> deltaHidden(hidden, 0.0);
+    for (std::size_t h = 0; h < hidden; ++h) {
+        double weighted = 0.0;
+        for (std::size_t o = 0; o < classes; ++o) {
+            weighted += dense2Weights[o][h] * deltaOutput[o];
+        }
+        deltaHidden[h] = (hiddenLinearCache[h] > 0.0) ? weighted : 0.0;
+    }
+
+    std::vector<double> deltaFlatten(flattenSize, 0.0);
+    for (std::size_t i = 0; i < flattenSize; ++i) {
+        double weighted = 0.0;
+        for (std::size_t h = 0; h < hidden; ++h) {
+            weighted += dense1Weights[h][i] * deltaHidden[h];
+        }
+        deltaFlatten[i] = weighted;
+    }
+
+    std::vector<std::vector<double>> deltaConvLinear(
+        filters, std::vector<double>(convArea, 0.0));
+    for (std::size_t filterIdx = 0; filterIdx < filters; ++filterIdx) {
+        const std::size_t offset = filterIdx * poolArea;
+        for (std::size_t i = 0; i < poolArea; ++i) {
+            const std::size_t convIdx = poolIndexCache[filterIdx][i];
+            deltaConvLinear[filterIdx][convIdx] += deltaFlatten[offset + i];
+        }
+    }
+
+    for (std::size_t filterIdx = 0; filterIdx < filters; ++filterIdx) {
+        for (std::size_t i = 0; i < convArea; ++i) {
+            if (convLinearCache[filterIdx][i] <= 0.0) {
+                deltaConvLinear[filterIdx][i] = 0.0;
+            }
+        }
+    }
+
+    for (std::size_t out = 0; out < classes; ++out) {
+        for (std::size_t in = 0; in < hidden; ++in) {
+            dense2Weights[out][in] -= lr * deltaOutput[out] * hiddenActivatedCache[in];
+        }
+        dense2Biases[out] -= lr * deltaOutput[out];
+    }
+
+    for (std::size_t out = 0; out < hidden; ++out) {
+        for (std::size_t in = 0; in < flattenSize; ++in) {
+            dense1Weights[out][in] -= lr * deltaHidden[out] * flattenedCache[in];
+        }
+        dense1Biases[out] -= lr * deltaHidden[out];
+    }
+
+    for (std::size_t filterIdx = 0; filterIdx < filters; ++filterIdx) {
+        for (std::size_t kr = 0; kr < kernel; ++kr) {
+            for (std::size_t kc = 0; kc < kernel; ++kc) {
+                double grad = 0.0;
+                for (std::size_t r = 0; r < convRows; ++r) {
+                    for (std::size_t c = 0; c < convCols; ++c) {
+                        const std::size_t convIdx = r * convCols + c;
+                        const std::size_t inputRow = r + kr;
+                        const std::size_t inputCol = c + kc;
+                        const std::size_t inputIdx = inputRow * inputCols + inputCol;
+                        grad += deltaConvLinear[filterIdx][convIdx] * inputCache[inputIdx];
+                    }
+                }
+
+                const std::size_t kernelIdx = kr * kernel + kc;
+                convKernels[filterIdx][kernelIdx] -= lr * grad;
+            }
+        }
+
+        double biasGrad = 0.0;
+        for (double delta : deltaConvLinear[filterIdx]) {
+            biasGrad += delta;
+        }
+        convBiases[filterIdx] -= lr * biasGrad;
+    }
+
+    double loss = 0.0;
+    const double eps = 1e-12;
+    for (std::size_t i = 0; i < classes; ++i) {
+        loss -= target[i] * std::log(outputCache[i] + eps);
+    }
+
+    return loss;
+}
+
+std::vector<double>
+ConvolutionalNeuralNetwork::softmax(const std::vector<double> &z) {
+    if (z.empty()) {
+        return {};
+    }
+
+    const double maxLogit = *std::max_element(z.begin(), z.end());
+    std::vector<double> exps(z.size(), 0.0);
+    double sum = 0.0;
+
+    for (std::size_t i = 0; i < z.size(); ++i) {
+        exps[i] = std::exp(z[i] - maxLogit);
+        sum += exps[i];
+    }
+
+    for (double &value : exps) {
+        value /= sum;
+    }
+
+    return exps;
 }
